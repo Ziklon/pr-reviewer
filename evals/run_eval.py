@@ -15,16 +15,16 @@ import time
 from pathlib import Path
 
 import typer
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
-
-load_dotenv()
 
 # Allow running from repo root without installing
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from pr_reviewer.auth import inject_auth  # noqa: E402
 from pr_reviewer.agents.supervisor import review  # noqa: E402
+
+inject_auth()
 
 REPO_ROOT = Path(__file__).parent.parent
 LABELS_FILE = REPO_ROOT / "evals" / "labels.json"
