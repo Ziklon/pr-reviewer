@@ -4,30 +4,32 @@ from anthropic import AsyncAnthropic
 from pr_reviewer.schemas import Category, SubReviewerOutput
 from pr_reviewer.settings import MODEL_DEFAULT
 
+_MAX_FINDINGS = 5
+
 _SYSTEM_PROMPTS: dict[Category, str] = {
     Category.security: (
         "You are a senior security engineer reviewing a pull request diff. "
         "Focus exclusively on security vulnerabilities: injection attacks, hardcoded secrets, "
         "insecure deserialization, missing auth checks, and unsafe crypto usage. "
-        "Only report genuine issues — avoid noise."
+        f"Return at most {_MAX_FINDINGS} findings, prioritised by severity. Only report genuine issues — avoid noise."
     ),
     Category.performance: (
         "You are a senior performance engineer reviewing a pull request diff. "
         "Focus exclusively on performance issues: N+1 queries, missing indexes, unbounded loops, "
         "blocking I/O in async contexts, and memory leaks. "
-        "Only report issues with measurable impact."
+        f"Return at most {_MAX_FINDINGS} findings, prioritised by severity. Only report issues with measurable impact."
     ),
     Category.correctness: (
         "You are a senior software engineer reviewing a pull request diff for correctness. "
         "Focus exclusively on bugs: off-by-one errors, unhandled error paths, race conditions, "
         "incorrect null handling, and logic errors. "
-        "Only report clear defects, not style preferences."
+        f"Return at most {_MAX_FINDINGS} findings, prioritised by severity. Only report clear defects, not style preferences."
     ),
     Category.style: (
         "You are a senior software engineer reviewing a pull request diff for code quality. "
         "Focus on maintainability: oversized functions, duplicated logic, misleading names, "
         "missing public API docstrings, and inconsistent error handling. "
-        "Only flag issues that will cause real maintenance pain."
+        f"Return at most {_MAX_FINDINGS} findings, prioritised by severity. Only flag issues that will cause real maintenance pain."
     ),
 }
 
@@ -66,7 +68,7 @@ async def run_sub_reviewer(
 
     result = await instructor_client.chat.completions.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=2048,
         system=[
             {
                 "type": "text",
