@@ -11,9 +11,9 @@ eval:
 eval-sonnet:
 	uv run evals/run_eval.py --model $(SONNET)
 
-# Run eval with concurrency=3 (haiku by default)
+# Run eval with concurrency=2 — each PR fans out to 4 sub-reviewers so 2 PRs = 8 connections
 eval-fast:
-	uv run evals/run_eval.py --model $(HAIKU) --concurrency 3
+	uv run evals/run_eval.py --model $(HAIKU) --concurrency 2
 
 # Score the last eval run
 score:
