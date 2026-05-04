@@ -1,0 +1,791 @@
+diff --git a/django/conf/__init__.py b/django/conf/__init__.py
+index 57623db42eb6..05345cb6e9e9 100644
+--- a/django/conf/__init__.py
++++ b/django/conf/__init__.py
+@@ -188,6 +188,7 @@ def __init__(self, settings_module):
+             "INSTALLED_APPS",
+             "TEMPLATE_DIRS",
+             "LOCALE_PATHS",
++            "SECRET_KEY_FALLBACKS",
+         )
+         self._explicit_settings = set()
+         for setting in dir(mod):
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index 66180702820b..c1a4ac693807 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -272,6 +272,10 @@ def gettext_noop(s):
+ # loudly.
+ SECRET_KEY = ''
+ 
++# List of secret keys used to verify the validity of signatures. This allows
++# secret key rotation.
++SECRET_KEY_FALLBACKS = []
++
+ # Default file storage mechanism that holds media.
+ DEFAULT_FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
+ 
+diff --git a/django/contrib/auth/tokens.py b/django/contrib/auth/tokens.py
+index d2882200f4e6..97ecd06bc81d 100644
+--- a/django/contrib/auth/tokens.py
++++ b/django/contrib/auth/tokens.py
+@@ -13,6 +13,7 @@ class PasswordResetTokenGenerator:
+     key_salt = "django.contrib.auth.tokens.PasswordResetTokenGenerator"
+     algorithm = None
+     _secret = None
++    _secret_fallbacks = None
+ 
+     def __init__(self):
+         self.algorithm = self.algorithm or 'sha256'
+@@ -25,12 +26,26 @@ def _set_secret(self, secret):
+ 
+     secret = property(_get_secret, _set_secret)
+ 
++    def _get_fallbacks(self):
++        if self._secret_fallbacks is None:
++            return settings.SECRET_KEY_FALLBACKS
++        return self._secret_fallbacks
++
++    def _set_fallbacks(self, fallbacks):
++        self._secret_fallbacks = fallbacks
++
++    secret_fallbacks = property(_get_fallbacks, _set_fallbacks)
++
+     def make_token(self, user):
+         """
+         Return a token that can be used once to do a password reset
+         for the given user.
+         """
+-        return self._make_token_with_timestamp(user, self._num_seconds(self._now()))
++        return self._make_token_with_timestamp(
++            user,
++            self._num_seconds(self._now()),
++            self.secret,
++        )
+ 
+     def check_token(self, user, token):
+         """
+@@ -50,7 +65,13 @@ def check_token(self, user, token):
+             return False
+ 
+         # Check that the timestamp/uid has not been tampered with
+-        if not constant_time_compare(self._make_token_with_timestamp(user, ts), token):
++        for secret in [self.secret, *self.secret_fallbacks]:
++            if constant_time_compare(
++                self._make_token_with_timestamp(user, ts, secret),
++                token,
++            ):
++                break
++        else:
+             return False
+ 
+         # Check the timestamp is within limit.
+@@ -59,14 +80,14 @@ def check_token(self, user, token):
+ 
+         return True
+ 
+-    def _make_token_with_timestamp(self, user, timestamp):
++    def _make_token_with_timestamp(self, user, timestamp, secret):
+         # timestamp is number of seconds since 2001-1-1. Converted to base 36,
+         # this gives us a 6 digit string until about 2069.
+         ts_b36 = int_to_base36(timestamp)
+         hash_string = salted_hmac(
+             self.key_salt,
+             self._make_hash_value(user, timestamp),
+-            secret=self.secret,
++            secret=secret,
+             algorithm=self.algorithm,
+         ).hexdigest()[::2]  # Limit to shorten the URL.
+         return "%s-%s" % (ts_b36, hash_string)
+diff --git a/django/core/checks/security/base.py b/django/core/checks/security/base.py
+index dacbfcfda9b3..d37b968a7dfc 100644
+--- a/django/core/checks/security/base.py
++++ b/django/core/checks/security/base.py
+@@ -16,6 +16,15 @@
+ SECRET_KEY_MIN_LENGTH = 50
+ SECRET_KEY_MIN_UNIQUE_CHARACTERS = 5
+ 
++SECRET_KEY_WARNING_MSG = (
++    f"Your %s has less than {SECRET_KEY_MIN_LENGTH} characters, less than "
++    f"{SECRET_KEY_MIN_UNIQUE_CHARACTERS} unique characters, or it's prefixed "
++    f"with '{SECRET_KEY_INSECURE_PREFIX}' indicating that it was generated "
++    f"automatically by Django. Please generate a long and random value, "
++    f"otherwise many of Django's security-critical features will be "
++    f"vulnerable to attack."
++)
++
+ W001 = Warning(
+     "You do not have 'django.middleware.security.SecurityMiddleware' "
+     "in your MIDDLEWARE so the SECURE_HSTS_SECONDS, "
+@@ -72,15 +81,7 @@
+ )
+ 
+ W009 = Warning(
+-    "Your SECRET_KEY has less than %(min_length)s characters, less than "
+-    "%(min_unique_chars)s unique characters, or it's prefixed with "
+-    "'%(insecure_prefix)s' indicating that it was generated automatically by "
+-    "Django. Please generate a long and random SECRET_KEY, otherwise many of "
+-    "Django's security-critical features will be vulnerable to attack." % {
+-        'min_length': SECRET_KEY_MIN_LENGTH,
+-        'min_unique_chars': SECRET_KEY_MIN_UNIQUE_CHARACTERS,
+-        'insecure_prefix': SECRET_KEY_INSECURE_PREFIX,
+-    },
++    SECRET_KEY_WARNING_MSG % 'SECRET_KEY',
+     id='security.W009',
+ )
+ 
+@@ -131,6 +132,8 @@
+     id='security.E024',
+ )
+ 
++W025 = Warning(SECRET_KEY_WARNING_MSG, id='security.W025')
++
+ 
+ def _security_middleware():
+     return 'django.middleware.security.SecurityMiddleware' in settings.MIDDLEWARE
+@@ -196,6 +199,14 @@ def check_ssl_redirect(app_configs, **kwargs):
+     return [] if passed_check else [W008]
+ 
+ 
++def _check_secret_key(secret_key):
++    return (
++        len(set(secret_key)) >= SECRET_KEY_MIN_UNIQUE_CHARACTERS and
++        len(secret_key) >= SECRET_KEY_MIN_LENGTH and
++        not secret_key.startswith(SECRET_KEY_INSECURE_PREFIX)
++    )
++
++
+ @register(Tags.security, deploy=True)
+ def check_secret_key(app_configs, **kwargs):
+     try:
+@@ -203,14 +214,28 @@ def check_secret_key(app_configs, **kwargs):
+     except (ImproperlyConfigured, AttributeError):
+         passed_check = False
+     else:
+-        passed_check = (
+-            len(set(secret_key)) >= SECRET_KEY_MIN_UNIQUE_CHARACTERS and
+-            len(secret_key) >= SECRET_KEY_MIN_LENGTH and
+-            not secret_key.startswith(SECRET_KEY_INSECURE_PREFIX)
+-        )
++        passed_check = _check_secret_key(secret_key)
+     return [] if passed_check else [W009]
+ 
+ 
++@register(Tags.security, deploy=True)
++def check_secret_key_fallbacks(app_configs, **kwargs):
++    warnings = []
++    try:
++        fallbacks = settings.SECRET_KEY_FALLBACKS
++    except (ImproperlyConfigured, AttributeError):
++        warnings.append(
++            Warning(W025.msg % 'SECRET_KEY_FALLBACKS', id=W025.id)
++        )
++    else:
++        for index, key in enumerate(fallbacks):
++            if not _check_secret_key(key):
++                warnings.append(
++                    Warning(W025.msg % f'SECRET_KEY_FALLBACKS[{index}]', id=W025.id)
++                )
++    return warnings
++
++
+ @register(Tags.security, deploy=True)
+ def check_debug(app_configs, **kwargs):
+     passed_check = not settings.DEBUG
+diff --git a/django/core/signing.py b/django/core/signing.py
+index 5ee19a93364c..cd86fdfab6bd 100644
+--- a/django/core/signing.py
++++ b/django/core/signing.py
+@@ -97,10 +97,18 @@ def base64_hmac(salt, value, key, algorithm='sha1'):
+     return b64_encode(salted_hmac(salt, value, key, algorithm=algorithm).digest()).decode()
+ 
+ 
++def _cookie_signer_key(key):
++    # SECRET_KEYS items may be str or bytes.
++    return b'django.http.cookies' + force_bytes(key)
++
++
+ def get_cookie_signer(salt='django.core.signing.get_cookie_signer'):
+     Signer = import_string(settings.SIGNING_BACKEND)
+-    key = force_bytes(settings.SECRET_KEY)  # SECRET_KEY may be str or bytes.
+-    return Signer(b'django.http.cookies' + key, salt=salt)
++    return Signer(
++        key=_cookie_signer_key(settings.SECRET_KEY),
++        fallback_keys=map(_cookie_signer_key, settings.SECRET_KEY_FALLBACKS),
++        salt=salt,
++    )
+ 
+ 
+ class JSONSerializer:
+@@ -135,18 +143,41 @@ def dumps(obj, key=None, salt='django.core.signing', serializer=JSONSerializer,
+     return TimestampSigner(key, salt=salt).sign_object(obj, serializer=serializer, compress=compress)
+ 
+ 
+-def loads(s, key=None, salt='django.core.signing', serializer=JSONSerializer, max_age=None):
++def loads(
++    s,
++    key=None,
++    salt='django.core.signing',
++    serializer=JSONSerializer,
++    max_age=None,
++    fallback_keys=None,
++):
+     """
+     Reverse of dumps(), raise BadSignature if signature fails.
+ 
+     The serializer is expected to accept a bytestring.
+     """
+-    return TimestampSigner(key, salt=salt).unsign_object(s, serializer=serializer, max_age=max_age)
++    return TimestampSigner(key, salt=salt, fallback_keys=fallback_keys).unsign_object(
++        s,
++        serializer=serializer,
++        max_age=max_age,
++    )
+ 
+ 
+ class Signer:
+-    def __init__(self, key=None, sep=':', salt=None, algorithm=None):
++    def __init__(
++        self,
++        key=None,
++        sep=':',
++        salt=None,
++        algorithm=None,
++        fallback_keys=None,
++    ):
+         self.key = key or settings.SECRET_KEY
++        self.fallback_keys = (
++            fallback_keys
++            if fallback_keys is not None
++            else settings.SECRET_KEY_FALLBACKS
++        )
+         self.sep = sep
+         if _SEP_UNSAFE.match(self.sep):
+             raise ValueError(
+@@ -156,8 +187,9 @@ def __init__(self, key=None, sep=':', salt=None, algorithm=None):
+         self.salt = salt or '%s.%s' % (self.__class__.__module__, self.__class__.__name__)
+         self.algorithm = algorithm or 'sha256'
+ 
+-    def signature(self, value):
+-        return base64_hmac(self.salt + 'signer', value, self.key, algorithm=self.algorithm)
++    def signature(self, value, key=None):
++        key = key or self.key
++        return base64_hmac(self.salt + 'signer', value, key, algorithm=self.algorithm)
+ 
+     def sign(self, value):
+         return '%s%s%s' % (value, self.sep, self.signature(value))
+@@ -166,8 +198,9 @@ def unsign(self, signed_value):
+         if self.sep not in signed_value:
+             raise BadSignature('No "%s" found in value' % self.sep)
+         value, sig = signed_value.rsplit(self.sep, 1)
+-        if constant_time_compare(sig, self.signature(value)):
+-            return value
++        for key in [self.key, *self.fallback_keys]:
++            if constant_time_compare(sig, self.signature(value, key)):
++                return value
+         raise BadSignature('Signature "%s" does not match' % sig)
+ 
+     def sign_object(self, obj, serializer=JSONSerializer, compress=False):
+diff --git a/docs/howto/deployment/checklist.txt b/docs/howto/deployment/checklist.txt
+index 929f19dbfc2d..45ca2be30e9f 100644
+--- a/docs/howto/deployment/checklist.txt
++++ b/docs/howto/deployment/checklist.txt
+@@ -59,6 +59,22 @@ or from a file::
+     with open('/etc/secret_key.txt') as f:
+         SECRET_KEY = f.read().strip()
+ 
++If rotating secret keys, you may use :setting:`SECRET_KEY_FALLBACKS`::
++
++    import os
++    SECRET_KEY = os.environ['CURRENT_SECRET_KEY']
++    SECRET_KEY_FALLBACKS = [
++        os.environ['OLD_SECRET_KEY'],
++    ]
++
++Ensure that old secret keys are removed from ``SECRET_KEY_FALLBACKS`` in a
++timely manner.
++
++.. versionchanged:: 4.1
++
++    The ``SECRET_KEY_FALLBACKS`` setting was added to support rotating secret
++    keys.
++
+ :setting:`DEBUG`
+ ----------------
+ 
+diff --git a/docs/ref/checks.txt b/docs/ref/checks.txt
+index 6c95b9376d11..3228d71f08be 100644
+--- a/docs/ref/checks.txt
++++ b/docs/ref/checks.txt
+@@ -457,8 +457,8 @@ The following checks are run if you use the :option:`check --deploy` option:
+ * **security.W009**: Your :setting:`SECRET_KEY` has less than 50 characters,
+   less than 5 unique characters, or it's prefixed with ``'django-insecure-'``
+   indicating that it was generated automatically by Django. Please generate a
+-  long and random ``SECRET_KEY``, otherwise many of Django's security-critical
+-  features will be vulnerable to attack.
++  long and random value, otherwise many of Django's security-critical features
++  will be vulnerable to attack.
+ * **security.W010**: You have :mod:`django.contrib.sessions` in your
+   :setting:`INSTALLED_APPS` but you have not set
+   :setting:`SESSION_COOKIE_SECURE` to ``True``. Using a secure-only session
+@@ -511,6 +511,12 @@ The following checks are run if you use the :option:`check --deploy` option:
+   to an invalid value.
+ * **security.E024**: You have set the
+   :setting:`SECURE_CROSS_ORIGIN_OPENER_POLICY` setting to an invalid value.
++* **security.W025**: Your
++  :setting:`SECRET_KEY_FALLBACKS[n] <SECRET_KEY_FALLBACKS>` has less than 50
++  characters, less than 5 unique characters, or it's prefixed with
++  ``'django-insecure-'`` indicating that it was generated automatically by
++  Django. Please generate a long and random value, otherwise many of Django's
++  security-critical features will be vulnerable to attack.
+ 
+ The following checks verify that your security-related settings are correctly
+ configured:
+diff --git a/docs/ref/settings.txt b/docs/ref/settings.txt
+index e65f92b4ffa0..dac29755d072 100644
+--- a/docs/ref/settings.txt
++++ b/docs/ref/settings.txt
+@@ -2291,9 +2291,11 @@ The secret key is used for:
+ * Any usage of :doc:`cryptographic signing </topics/signing>`, unless a
+   different key is provided.
+ 
+-If you rotate your secret key, all of the above will be invalidated.
+-Secret keys are not used for passwords of users and key rotation will not
+-affect them.
++When a secret key is no longer set as :setting:`SECRET_KEY` or contained within
++:setting:`SECRET_KEY_FALLBACKS` all of the above will be invalidated. When
++rotating your secret key, you should move the old key to
++:setting:`SECRET_KEY_FALLBACKS` temporarily. Secret keys are not used for
++passwords of users and key rotation will not affect them.
+ 
+ .. note::
+ 
+@@ -2301,6 +2303,36 @@ affect them.
+     startproject <startproject>` creates a unique ``SECRET_KEY`` for
+     convenience.
+ 
++.. setting:: SECRET_KEY_FALLBACKS
++
++``SECRET_KEY_FALLBACKS``
++------------------------
++
++.. versionadded:: 4.1
++
++Default: ``[]``
++
++A list of fallback secret keys for a particular Django installation. These are
++used to allow rotation of the ``SECRET_KEY``.
++
++In order to rotate your secret keys, set a new ``SECRET_KEY`` and move the
++previous value to the beginning of ``SECRET_KEY_FALLBACKS``. Then remove the
++old values from the end of the ``SECRET_KEY_FALLBACKS`` when you are ready to
++expire the sessions, password reset tokens, and so on, that make use of them.
++
++.. note::
++
++    Signing operations are computationally expensive. Having multiple old key
++    values in ``SECRET_KEY_FALLBACKS`` adds additional overhead to all checks
++    that don't match an earlier key.
++
++    As such, fallback values should be removed after an appropriate period,
++    allowing for key rotation.
++
++Uses of the secret key values shouldn't assume that they are text or bytes.
++Every use should go through :func:`~django.utils.encoding.force_str` or
++:func:`~django.utils.encoding.force_bytes` to convert it to the desired type.
++
+ .. setting:: SECURE_CONTENT_TYPE_NOSNIFF
+ 
+ ``SECURE_CONTENT_TYPE_NOSNIFF``
+@@ -3725,6 +3757,7 @@ Security
+   * :setting:`CSRF_USE_SESSIONS`
+ 
+ * :setting:`SECRET_KEY`
++* :setting:`SECRET_KEY_FALLBACKS`
+ * :setting:`X_FRAME_OPTIONS`
+ 
+ Serialization
+diff --git a/docs/releases/4.1.txt b/docs/releases/4.1.txt
+index 6633262255f2..02d51ed2a5f6 100644
+--- a/docs/releases/4.1.txt
++++ b/docs/releases/4.1.txt
+@@ -254,7 +254,8 @@ Requests and Responses
+ Security
+ ~~~~~~~~
+ 
+-* ...
++* The new :setting:`SECRET_KEY_FALLBACKS` setting allows providing a list of
++  values for secret key rotation.
+ 
+ Serialization
+ ~~~~~~~~~~~~~
+diff --git a/docs/topics/auth/default.txt b/docs/topics/auth/default.txt
+index d09977883646..bef1486cdd24 100644
+--- a/docs/topics/auth/default.txt
++++ b/docs/topics/auth/default.txt
+@@ -912,8 +912,9 @@ function.
+ 
+     Since
+     :meth:`~django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash()`
+-    is based on :setting:`SECRET_KEY`, updating your site to use a new secret
+-    will invalidate all existing sessions.
++    is based on :setting:`SECRET_KEY`, secret key values must be
++    rotated to avoid invalidating existing sessions when updating your site to
++    use a new secret. See :setting:`SECRET_KEY_FALLBACKS` for details.
+ 
+ .. _built-in-auth-views:
+ 
+diff --git a/docs/topics/http/sessions.txt b/docs/topics/http/sessions.txt
+index 20502208a89e..2f9f29b84b36 100644
+--- a/docs/topics/http/sessions.txt
++++ b/docs/topics/http/sessions.txt
+@@ -123,13 +123,15 @@ and the :setting:`SECRET_KEY` setting.
+ 
+ .. warning::
+ 
+-    **If the SECRET_KEY is not kept secret and you are using the**
+-    ``django.contrib.sessions.serializers.PickleSerializer``, **this can
+-    lead to arbitrary remote code execution.**
++    **If the ``SECRET_KEY`` or ``SECRET_KEY_FALLBACKS`` are not kept secret and
++    you are using the**
++    ``django.contrib.sessions.serializers.PickleSerializer``, **this can lead
++    to arbitrary remote code execution.**
+ 
+-    An attacker in possession of the :setting:`SECRET_KEY` can not only
+-    generate falsified session data, which your site will trust, but also
+-    remotely execute arbitrary code, as the data is serialized using pickle.
++    An attacker in possession of the :setting:`SECRET_KEY` or
++    :setting:`SECRET_KEY_FALLBACKS` can not only generate falsified session
++    data, which your site will trust, but also remotely execute arbitrary code,
++    as the data is serialized using pickle.
+ 
+     If you use cookie-based sessions, pay extra care that your secret key is
+     always kept completely secret, for any system which might be remotely
+@@ -323,11 +325,12 @@ cookie backend*.
+ 
+ For example, here's an attack scenario if you use :mod:`pickle` to serialize
+ session data. If you're using the :ref:`signed cookie session backend
+-<cookie-session-backend>` and :setting:`SECRET_KEY` is known by an attacker
+-(there isn't an inherent vulnerability in Django that would cause it to leak),
+-the attacker could insert a string into their session which, when unpickled,
+-executes arbitrary code on the server. The technique for doing so is simple and
+-easily available on the internet. Although the cookie session storage signs the
++<cookie-session-backend>` and :setting:`SECRET_KEY` (or any key of
++:setting:`SECRET_KEY_FALLBACKS`) is known by an attacker (there isn't an
++inherent vulnerability in Django that would cause it to leak), the attacker
++could insert a string into their session which, when unpickled, executes
++arbitrary code on the server. The technique for doing so is simple and easily
++available on the internet. Although the cookie session storage signs the
+ cookie-stored data to prevent tampering, a :setting:`SECRET_KEY` leak
+ immediately escalates to a remote code execution vulnerability.
+ 
+@@ -359,8 +362,8 @@ Bundled serializers
+ .. class:: serializers.PickleSerializer
+ 
+     Supports arbitrary Python objects, but, as described above, can lead to a
+-    remote code execution vulnerability if :setting:`SECRET_KEY` becomes known
+-    by an attacker.
++    remote code execution vulnerability if :setting:`SECRET_KEY` or any key of
++    :setting:`SECRET_KEY_FALLBACKS` becomes known by an attacker.
+ 
+     .. deprecated:: 4.1
+ 
+diff --git a/docs/topics/security.txt b/docs/topics/security.txt
+index ee7c7f542b32..abc8d5d6ac02 100644
+--- a/docs/topics/security.txt
++++ b/docs/topics/security.txt
+@@ -296,7 +296,8 @@ security protection of the web server, operating system and other components.
+ * Django does not throttle requests to authenticate users. To protect against
+   brute-force attacks against the authentication system, you may consider
+   deploying a Django plugin or web server module to throttle these requests.
+-* Keep your :setting:`SECRET_KEY` a secret.
++* Keep your :setting:`SECRET_KEY`, and :setting:`SECRET_KEY_FALLBACKS` if in
++  use, secret.
+ * It is a good idea to limit the accessibility of your caching system and
+   database using a firewall.
+ * Take a look at the Open Web Application Security Project (OWASP) `Top 10
+diff --git a/docs/topics/signing.txt b/docs/topics/signing.txt
+index 8791697b85bb..9ae5ca33515f 100644
+--- a/docs/topics/signing.txt
++++ b/docs/topics/signing.txt
+@@ -25,8 +25,8 @@ You may also find signing useful for the following:
+   protected resource, for example a downloadable file that a user has
+   paid for.
+ 
+-Protecting the ``SECRET_KEY``
+-=============================
++Protecting ``SECRET_KEY`` and ``SECRET_KEY_FALLBACKS``
++======================================================
+ 
+ When you create a new Django project using :djadmin:`startproject`, the
+ ``settings.py`` file is generated automatically and gets a random
+@@ -34,6 +34,14 @@ When you create a new Django project using :djadmin:`startproject`, the
+ data -- it is vital you keep this secure, or attackers could use it to
+ generate their own signed values.
+ 
++:setting:`SECRET_KEY_FALLBACKS` can be used to rotate secret keys. The
++values will not be used to sign data, but if specified, they will be used to
++validate signed data and must be kept secure.
++
++.. versionchanged:: 4.1
++
++    The ``SECRET_KEY_FALLBACKS`` setting was added.
++
+ Using the low-level API
+ =======================
+ 
+@@ -93,13 +101,19 @@ generate signatures. You can use a different secret by passing it to the
+     >>> value
+     'My string:EkfQJafvGyiofrdGnuthdxImIJw'
+ 
+-.. class:: Signer(key=None, sep=':', salt=None, algorithm=None)
++.. class:: Signer(key=None, sep=':', salt=None, algorithm=None, fallback_keys=None)
+ 
+     Returns a signer which uses ``key`` to generate signatures and ``sep`` to
+     separate values. ``sep`` cannot be in the :rfc:`URL safe base64 alphabet
+     <4648#section-5>`. This alphabet contains alphanumeric characters, hyphens,
+     and underscores. ``algorithm`` must be an algorithm supported by
+-    :py:mod:`hashlib`, it defaults to ``'sha256'``.
++    :py:mod:`hashlib`, it defaults to ``'sha256'``. ``fallback_keys`` is a list
++    of additional values used to validate signed data, defaults to
++    :setting:`SECRET_KEY_FALLBACKS`.
++
++    .. versionchanged:: 4.1
++
++        The ``fallback_keys`` argument was added.
+ 
+ Using the ``salt`` argument
+ ---------------------------
+@@ -221,7 +235,11 @@ and tuples) if you pass in a tuple, you will get a list from
+     Returns URL-safe, signed base64 compressed JSON string. Serialized object
+     is signed using :class:`~TimestampSigner`.
+ 
+-.. function:: loads(string, key=None, salt='django.core.signing', serializer=JSONSerializer, max_age=None)
++.. function:: loads(string, key=None, salt='django.core.signing', serializer=JSONSerializer, max_age=None, fallback_keys=None)
+ 
+     Reverse of ``dumps()``, raises ``BadSignature`` if signature fails.
+     Checks ``max_age`` (in seconds) if given.
++
++    .. versionchanged:: 4.1
++
++        The ``fallback_keys`` argument was added.
+diff --git a/tests/auth_tests/test_tokens.py b/tests/auth_tests/test_tokens.py
+index ff26bd626b52..2f3f52aac624 100644
+--- a/tests/auth_tests/test_tokens.py
++++ b/tests/auth_tests/test_tokens.py
+@@ -140,3 +140,39 @@ def test_secret_lazy_validation(self):
+         msg = 'The SECRET_KEY setting must not be empty.'
+         with self.assertRaisesMessage(ImproperlyConfigured, msg):
+             default_token_generator.secret
++
++    def test_check_token_secret_fallbacks(self):
++        user = User.objects.create_user('tokentestuser', 'test2@example.com', 'testpw')
++        p1 = PasswordResetTokenGenerator()
++        p1.secret = 'secret'
++        tk = p1.make_token(user)
++        p2 = PasswordResetTokenGenerator()
++        p2.secret = 'newsecret'
++        p2.secret_fallbacks = ['secret']
++        self.assertIs(p1.check_token(user, tk), True)
++        self.assertIs(p2.check_token(user, tk), True)
++
++    @override_settings(
++        SECRET_KEY='secret',
++        SECRET_KEY_FALLBACKS=['oldsecret'],
++    )
++    def test_check_token_secret_key_fallbacks(self):
++        user = User.objects.create_user('tokentestuser', 'test2@example.com', 'testpw')
++        p1 = PasswordResetTokenGenerator()
++        p1.secret = 'oldsecret'
++        tk = p1.make_token(user)
++        p2 = PasswordResetTokenGenerator()
++        self.assertIs(p2.check_token(user, tk), True)
++
++    @override_settings(
++        SECRET_KEY='secret',
++        SECRET_KEY_FALLBACKS=['oldsecret'],
++    )
++    def test_check_token_secret_key_fallbacks_override(self):
++        user = User.objects.create_user('tokentestuser', 'test2@example.com', 'testpw')
++        p1 = PasswordResetTokenGenerator()
++        p1.secret = 'oldsecret'
++        tk = p1.make_token(user)
++        p2 = PasswordResetTokenGenerator()
++        p2.secret_fallbacks = []
++        self.assertIs(p2.check_token(user, tk), False)
+diff --git a/tests/check_framework/test_security.py b/tests/check_framework/test_security.py
+index 774ba068f920..9002deefc556 100644
+--- a/tests/check_framework/test_security.py
++++ b/tests/check_framework/test_security.py
+@@ -1,5 +1,5 @@
+ from django.conf import settings
+-from django.core.checks.messages import Error
++from django.core.checks.messages import Error, Warning
+ from django.core.checks.security import base, csrf, sessions
+ from django.core.management.utils import get_random_secret_key
+ from django.test import SimpleTestCase
+@@ -414,6 +414,79 @@ def test_low_entropy_secret_key(self):
+         self.assertEqual(base.check_secret_key(None), [base.W009])
+ 
+ 
++class CheckSecretKeyFallbacksTest(SimpleTestCase):
++    @override_settings(SECRET_KEY_FALLBACKS=[('abcdefghijklmnopqrstuvwx' * 2) + 'ab'])
++    def test_okay_secret_key_fallbacks(self):
++        self.assertEqual(
++            len(settings.SECRET_KEY_FALLBACKS[0]),
++            base.SECRET_KEY_MIN_LENGTH,
++        )
++        self.assertGreater(
++            len(set(settings.SECRET_KEY_FALLBACKS[0])),
++            base.SECRET_KEY_MIN_UNIQUE_CHARACTERS,
++        )
++        self.assertEqual(base.check_secret_key_fallbacks(None), [])
++
++    def test_no_secret_key_fallbacks(self):
++        with self.settings(SECRET_KEY_FALLBACKS=None):
++            del settings.SECRET_KEY_FALLBACKS
++            self.assertEqual(base.check_secret_key_fallbacks(None), [
++                Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS', id=base.W025.id),
++            ])
++
++    @override_settings(SECRET_KEY_FALLBACKS=[
++        base.SECRET_KEY_INSECURE_PREFIX + get_random_secret_key()
++    ])
++    def test_insecure_secret_key_fallbacks(self):
++        self.assertEqual(base.check_secret_key_fallbacks(None), [
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[0]', id=base.W025.id),
++        ])
++
++    @override_settings(SECRET_KEY_FALLBACKS=[('abcdefghijklmnopqrstuvwx' * 2) + 'a'])
++    def test_low_length_secret_key_fallbacks(self):
++        self.assertEqual(
++            len(settings.SECRET_KEY_FALLBACKS[0]),
++            base.SECRET_KEY_MIN_LENGTH - 1,
++        )
++        self.assertEqual(base.check_secret_key_fallbacks(None), [
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[0]', id=base.W025.id),
++        ])
++
++    @override_settings(SECRET_KEY_FALLBACKS=['abcd' * 20])
++    def test_low_entropy_secret_key_fallbacks(self):
++        self.assertGreater(
++            len(settings.SECRET_KEY_FALLBACKS[0]),
++            base.SECRET_KEY_MIN_LENGTH,
++        )
++        self.assertLess(
++            len(set(settings.SECRET_KEY_FALLBACKS[0])),
++            base.SECRET_KEY_MIN_UNIQUE_CHARACTERS,
++        )
++        self.assertEqual(base.check_secret_key_fallbacks(None), [
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[0]', id=base.W025.id),
++        ])
++
++    @override_settings(SECRET_KEY_FALLBACKS=[
++        ('abcdefghijklmnopqrstuvwx' * 2) + 'ab',
++        'badkey',
++    ])
++    def test_multiple_keys(self):
++        self.assertEqual(base.check_secret_key_fallbacks(None), [
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[1]', id=base.W025.id),
++        ])
++
++    @override_settings(SECRET_KEY_FALLBACKS=[
++        ('abcdefghijklmnopqrstuvwx' * 2) + 'ab',
++        'badkey1',
++        'badkey2',
++    ])
++    def test_multiple_bad_keys(self):
++        self.assertEqual(base.check_secret_key_fallbacks(None), [
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[1]', id=base.W025.id),
++            Warning(base.W025.msg % 'SECRET_KEY_FALLBACKS[2]', id=base.W025.id),
++        ])
++
++
+ class CheckDebugTest(SimpleTestCase):
+     @override_settings(DEBUG=True)
+     def test_debug_true(self):
+diff --git a/tests/settings_tests/tests.py b/tests/settings_tests/tests.py
+index e958a984fac4..ffe096087a71 100644
+--- a/tests/settings_tests/tests.py
++++ b/tests/settings_tests/tests.py
+@@ -483,6 +483,7 @@ class TestListSettings(SimpleTestCase):
+         "INSTALLED_APPS",
+         "TEMPLATE_DIRS",
+         "LOCALE_PATHS",
++        "SECRET_KEY_FALLBACKS",
+     )
+ 
+     def test_tuple_settings(self):
+diff --git a/tests/signing/tests.py b/tests/signing/tests.py
+index 1bd7277bc636..c375f2dbf2c6 100644
+--- a/tests/signing/tests.py
++++ b/tests/signing/tests.py
+@@ -1,7 +1,7 @@
+ import datetime
+ 
+ from django.core import signing
+-from django.test import SimpleTestCase
++from django.test import SimpleTestCase, override_settings
+ from django.test.utils import freeze_time
+ from django.utils.crypto import InvalidAlgorithm
+ 
+@@ -178,6 +178,39 @@ def test_invalid_sep(self):
+             with self.assertRaisesMessage(ValueError, msg % sep):
+                 signing.Signer(sep=sep)
+ 
++    def test_verify_with_non_default_key(self):
++        old_signer = signing.Signer('secret')
++        new_signer = signing.Signer('newsecret', fallback_keys=['othersecret', 'secret'])
++        signed = old_signer.sign('abc')
++        self.assertEqual(new_signer.unsign(signed), 'abc')
++
++    def test_sign_unsign_multiple_keys(self):
++        """The default key is a valid verification key."""
++        signer = signing.Signer('secret', fallback_keys=['oldsecret'])
++        signed = signer.sign('abc')
++        self.assertEqual(signer.unsign(signed), 'abc')
++
++    @override_settings(
++        SECRET_KEY='secret',
++        SECRET_KEY_FALLBACKS=['oldsecret'],
++    )
++    def test_sign_unsign_ignore_secret_key_fallbacks(self):
++        old_signer = signing.Signer('oldsecret')
++        signed = old_signer.sign('abc')
++        signer = signing.Signer(fallback_keys=[])
++        with self.assertRaises(signing.BadSignature):
++            signer.unsign(signed)
++
++    @override_settings(
++        SECRET_KEY='secret',
++        SECRET_KEY_FALLBACKS=['oldsecret'],
++    )
++    def test_default_keys_verification(self):
++        old_signer = signing.Signer('oldsecret')
++        signed = old_signer.sign('abc')
++        signer = signing.Signer()
++        self.assertEqual(signer.unsign(signed), 'abc')
++
+ 
+ class TestTimestampSigner(SimpleTestCase):
+ 
+diff --git a/tests/view_tests/tests/test_debug.py b/tests/view_tests/tests/test_debug.py
+index 8eda91ec35ff..84d675b79b76 100644
+--- a/tests/view_tests/tests/test_debug.py
++++ b/tests/view_tests/tests/test_debug.py
+@@ -1459,6 +1459,7 @@ def test_sensitive_settings(self):
+         """
+         sensitive_settings = [
+             'SECRET_KEY',
++            'SECRET_KEY_FALLBACKS',
+             'PASSWORD',
+             'API_KEY',
+             'AUTH_TOKEN',
+@@ -1475,6 +1476,7 @@ def test_settings_with_sensitive_keys(self):
+         """
+         sensitive_settings = [
+             'SECRET_KEY',
++            'SECRET_KEY_FALLBACKS',
+             'PASSWORD',
+             'API_KEY',
+             'AUTH_TOKEN',

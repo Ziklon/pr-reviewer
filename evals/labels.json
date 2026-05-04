@@ -1,0 +1,83 @@
+[
+  {
+    "id": "django-django-15198",
+    "pr_url": "https://github.com/django/django/pull/15198",
+    "category": "security",
+    "note": "Secret key rotation with fallback",
+    "diff_file": "evals/prs/django-django-15198.diff",
+    "diff_lines": 791,
+    "human_findings": []
+  },
+  {
+    "id": "psf-requests-6667",
+    "pr_url": "https://github.com/psf/requests/pull/6667",
+    "category": "performance",
+    "note": "Avoid reloading SSL root certs on every request",
+    "diff_file": "evals/prs/psf-requests-6667.diff",
+    "diff_lines": 83,
+    "human_findings": []
+  },
+  {
+    "id": "megaease-easeprobe-330",
+    "pr_url": "https://github.com/megaease/easeprobe/pull/330",
+    "category": "security",
+    "note": "SQL injection prevention via proper escaping",
+    "diff_file": "evals/prs/megaease-easeprobe-330.diff",
+    "diff_lines": 198,
+    "human_findings": []
+  },
+  {
+    "id": "scrapy-scrapy-3813",
+    "pr_url": "https://github.com/scrapy/scrapy/pull/3813",
+    "category": "performance",
+    "note": "Fix memory leak in Media Pipeline",
+    "diff_file": "evals/prs/scrapy-scrapy-3813.diff",
+    "diff_lines": 147,
+    "human_findings": []
+  },
+  {
+    "id": "redis-redis-py-2641",
+    "pr_url": "https://github.com/redis/redis-py/pull/2641",
+    "category": "correctness",
+    "note": "AsyncIO race condition fix in connection pool",
+    "diff_file": "evals/prs/redis-redis-py-2641.diff",
+    "diff_lines": 840,
+    "human_findings": []
+  },
+  {
+    "id": "aio-libs-aiohttp-970",
+    "pr_url": "https://github.com/aio-libs/aiohttp/pull/970",
+    "category": "correctness",
+    "note": "Fix CancelledError suppression on timeout",
+    "diff_file": "evals/prs/aio-libs-aiohttp-970.diff",
+    "diff_lines": 31,
+    "human_findings": []
+  },
+  {
+    "id": "vercel-next.js-13509",
+    "pr_url": "https://github.com/vercel/next.js/pull/13509",
+    "category": "security",
+    "note": "Trusted Types policy against DOM XSS",
+    "diff_file": "evals/prs/vercel-next.js-13509.diff",
+    "diff_lines": 35,
+    "human_findings": []
+  },
+  {
+    "id": "sympy-sympy-503",
+    "pr_url": "https://github.com/sympy/sympy/pull/503",
+    "category": "correctness",
+    "note": "Numerical stability via relative error",
+    "diff_file": "evals/prs/sympy-sympy-503.diff",
+    "diff_lines": 157,
+    "human_findings": []
+  },
+  {
+    "id": "elastic-elasticsearch-js-1594",
+    "pr_url": "https://github.com/elastic/elasticsearch-js/pull/1594",
+    "category": "correctness",
+    "note": "Null reference fix in Transport.js",
+    "diff_file": "evals/prs/elastic-elasticsearch-js-1594.diff",
+    "diff_lines": 176,
+    "human_findings": []
+  }
+]

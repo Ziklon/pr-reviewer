@@ -1,0 +1,35 @@
+security:
+  enabled: true
+  focus:
+    - injection vulnerabilities (SQL, command, path traversal)
+    - hardcoded secrets or credentials
+    - insecure deserialization
+    - missing authentication or authorization checks
+    - unsafe use of cryptography
+
+performance:
+  enabled: true
+  focus:
+    - N+1 queries
+    - missing indexes on frequently queried columns
+    - unbounded loops or recursion
+    - unnecessary blocking I/O in async contexts
+    - memory leaks (unclosed resources, accumulating state)
+
+correctness:
+  enabled: true
+  focus:
+    - off-by-one errors
+    - unchecked error / exception paths
+    - race conditions
+    - incorrect null/None handling
+    - logic errors in conditionals
+
+style:
+  enabled: true
+  focus:
+    - functions exceeding 50 lines without clear decomposition
+    - duplicated logic that should be extracted
+    - misleading variable or function names
+    - missing or incorrect docstrings on public APIs
+    - inconsistent error handling patterns
