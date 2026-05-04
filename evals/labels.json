@@ -6,7 +6,28 @@
     "note": "Secret key rotation with fallback",
     "diff_file": "evals/prs/django-django-15198.diff",
     "diff_lines": 791,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "django/contrib/auth/tokens.py",
+        "line_range": [65, 80],
+        "severity": "high",
+        "category": "security",
+        "issue": "check_token() had no fallback-key support: rotating SECRET_KEY immediately invalidates all in-flight password reset tokens, forcing operators to choose between key-rotation hygiene and keeping existing tokens valid.",
+        "suggested_fix": "Iterate [primary_secret, *fallback_secrets] as implemented — try each key with constant_time_compare and break on match, return False only after exhausting all keys.",
+        "confidence": 0.95,
+        "reasoning": "The original code called _make_token_with_timestamp with only self.secret (line 72 of the original). A rotated SECRET_KEY produced a different HMAC, so valid tokens issued under the old key always failed check_token. The for-else loop at diff lines 73-80 fixes this."
+      },
+      {
+        "file": "django/core/checks/security/base.py",
+        "line_range": [174, 189],
+        "severity": "low",
+        "category": "security",
+        "issue": "check_secret_key_fallbacks emits W025 when the setting attribute is missing (AttributeError), but SECRET_KEY_FALLBACKS defaults to [] in global_settings so the attribute is always present in a normal Django install — the AttributeError branch is dead in practice and the warning message is misleading.",
+        "suggested_fix": "Remove the AttributeError/ImproperlyConfigured branch or document clearly what scenario triggers it.",
+        "confidence": 0.75,
+        "reasoning": "global_settings.py sets SECRET_KEY_FALLBACKS = [] unconditionally (diff line 23). The try/except in check_secret_key_fallbacks (diff lines 178-189) handles a case that can't arise through normal Django configuration."
+      }
+    ]
   },
   {
     "id": "psf-requests-6667",
@@ -15,7 +36,28 @@
     "note": "Avoid reloading SSL root certs on every request",
     "diff_file": "evals/prs/psf-requests-6667.diff",
     "diff_lines": 83,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "src/requests/adapters.py",
+        "line_range": [44, 80],
+        "severity": "high",
+        "category": "performance",
+        "issue": "cert_verify() called load_verify_locations() on every HTTPS request when verify=True by setting conn.ca_certs = cert_loc, which internally re-parses and loads the entire CA bundle on each connection. For high-throughput clients this is a measurable per-request cost.",
+        "suggested_fix": "Build the SSL context once at module import time with load_verify_locations pre-called, then pass it via pool_kwargs['ssl_context'] for the verify=True path as implemented.",
+        "confidence": 0.95,
+        "reasoning": "The original cert_verify code set conn.ca_certs = cert_loc on every call (diff lines 73-76 removed). urllib3 reloads certificates on each connection when ca_certs is set. The new _preloaded_ssl_context singleton (diff lines 17-20) moves that cost to import time."
+      },
+      {
+        "file": "src/requests/adapters.py",
+        "line_range": [17, 20],
+        "severity": "low",
+        "category": "security",
+        "issue": "_preloaded_ssl_context is a module-level singleton loaded once at import time. If the CA bundle on disk is updated (e.g., certificate renewal) after the process starts, the running process will continue using the stale bundle until restart.",
+        "suggested_fix": "Document this trade-off. For processes that run for extended periods in environments with rolling CA updates, provide an escape hatch to reload the context.",
+        "confidence": 0.8,
+        "reasoning": "The context is created at lines 17-20 with load_verify_locations called once. Any subsequent changes to DEFAULT_CA_BUNDLE_PATH on disk are ignored for the lifetime of the process."
+      }
+    ]
   },
   {
     "id": "megaease-easeprobe-330",
@@ -24,7 +66,28 @@
     "note": "SQL injection prevention via proper escaping",
     "diff_file": "evals/prs/megaease-easeprobe-330.diff",
     "diff_lines": 198,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "probe/client/mysql/mysql.go",
+        "line_range": [158, 169],
+        "severity": "critical",
+        "category": "security",
+        "issue": "getSQL() interpolated user-supplied values (database, table, field, key) directly into a SQL string with fmt.Sprintf and no escaping, enabling SQL injection through any of the five colon-delimited config fields.",
+        "suggested_fix": "Apply EscapeQuote to all identifier fields and wrap them in backtick-quoted identifiers as implemented. The numeric-only check on `value` is correct and should be kept.",
+        "confidence": 0.98,
+        "reasoning": "Original line 168: `sql := fmt.Sprintf(\"SELECT %s FROM %s.%s WHERE %s = %s\", field, db, table, key, value)` — field, db, table, and key are taken from user config strings and are completely unsanitized."
+      },
+      {
+        "file": "probe/client/postgres/postgres.go",
+        "line_range": [185, 196],
+        "severity": "medium",
+        "category": "security",
+        "issue": "EscapeQuote replaces double-quotes with backslash-escaped form (`\"`), which is MySQL convention. PostgreSQL standard SQL requires doubling the quote character (`\"\"`) to escape identifiers — the MySQL-style escaping may not protect correctly in all PostgreSQL identifier contexts.",
+        "suggested_fix": "Use a PostgreSQL-specific identifier escaping function that doubles double-quote characters instead of backslash-escaping them, or use parameterized queries for identifier substitution.",
+        "confidence": 0.85,
+        "reasoning": "EscapeQuote at global/global.go line 19 replaces `\"` with `\\\"`. PostgreSQL identifier quoting requires `\"foo\"\"bar\"` not `\"foo\\\"bar\"`. The same EscapeQuote is applied to both MySQL (diff line 158) and PostgreSQL (diff line 185) getSQL functions."
+      }
+    ]
   },
   {
     "id": "scrapy-scrapy-3813",
@@ -33,7 +96,18 @@
     "note": "Fix memory leak in Media Pipeline",
     "diff_file": "evals/prs/scrapy-scrapy-3813.diff",
     "diff_lines": 147,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "scrapy/pipelines/media.py",
+        "line_range": [19, 41],
+        "severity": "high",
+        "category": "performance",
+        "issue": "Memory leak in _cache_result_and_execute_waiters: when media_downloaded raises FileException after a Twisted inline callback returns a Response via returnValue(), Python 3 exception chaining stores the _DefGen_Return exception (which holds the Response) in FileException.__context__. The Twisted Failure is then cached in info.downloaded, keeping a reference chain Request → Response → _DefGen_Return alive indefinitely.",
+        "suggested_fix": "After storing the failure in the cache, check if result.value.__context__ is a _DefGen_Return instance and set it to None to break the reference chain, as implemented.",
+        "confidence": 0.95,
+        "reasoning": "info.downloaded[fp] = result at the end of _cache_result_and_execute_waiters stores the Failure permanently. The Failure wraps a FileException whose __context__ holds a _DefGen_Return wrapping the full Response object (which back-references the Request). This chain prevents GC. Fix at diff lines 38-40."
+      }
+    ]
   },
   {
     "id": "redis-redis-py-2641",
@@ -42,7 +116,28 @@
     "note": "AsyncIO race condition fix in connection pool",
     "diff_file": "evals/prs/redis-redis-py-2641.diff",
     "diff_lines": 840,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "redis/asyncio/client.py",
+        "line_range": [8, 22],
+        "severity": "high",
+        "category": "correctness",
+        "issue": "Task cancellation during Pipeline.execute() interrupted the retry coroutine mid-flight, leaving the connection with an unread server response buffered. When that connection was returned to the pool and reused, the buffered bytes from the cancelled command would corrupt the next command's response parsing.",
+        "suggested_fix": "Wrap the retry call with asyncio.shield() so the inner coroutine completes even after the outer task is cancelled. Catch CancelledError explicitly, disconnect the connection to drain it, then re-raise.",
+        "confidence": 0.95,
+        "reasoning": "Without asyncio.shield(), a CancelledError at `await conn.retry.call_with_retry(...)` cancels the coroutine at any await point inside the retry loop. If cancelled after sending the command but before reading the response, the connection is corrupt. The fix at diff lines 12-21 shields the operation and disconnects on CancelledError."
+      },
+      {
+        "file": "redis/asyncio/cluster.py",
+        "line_range": [33, 47],
+        "severity": "high",
+        "category": "correctness",
+        "issue": "Same cancellation race exists in RedisCluster.execute_command(): parse_response() is awaited without shielding, so a CancelledError leaves the cluster connection with an unread response and the connection is never released back to _free.",
+        "suggested_fix": "Extract parse_response into a shielded helper (_parse_and_release) that catches CancelledError, disconnects, and still appends the connection to _free in the finally block.",
+        "confidence": 0.92,
+        "reasoning": "The original finally block only called `self._free.append(connection)` after a successful parse_response. A cancellation before that line leaves the connection leaked from the pool. The new _parse_and_release helper at diff lines 37-47 handles this."
+      }
+    ]
   },
   {
     "id": "aio-libs-aiohttp-970",
@@ -51,7 +146,18 @@
     "note": "Fix CancelledError suppression on timeout",
     "diff_file": "evals/prs/aio-libs-aiohttp-970.diff",
     "diff_lines": 31,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "aiohttp/helpers.py",
+        "line_range": [5, 10],
+        "severity": "medium",
+        "category": "correctness",
+        "issue": "Timeout.__exit__ raised asyncio.TimeoutError without suppressing the exception chain. Python 3 exception chaining automatically set TimeoutError.__context__ = CancelledError, producing misleading tracebacks where users saw a CancelledError nested inside TimeoutError even though the timeout was the real cause.",
+        "suggested_fix": "Use `raise asyncio.TimeoutError from None` to set __suppress_context__ = True, hiding the CancelledError from the traceback as implemented.",
+        "confidence": 0.97,
+        "reasoning": "In __exit__, exc_type is asyncio.CancelledError (line 6 of diff). `raise asyncio.TimeoutError` without `from None` makes Python set TimeoutError.__context__ = the active CancelledError, surfacing it in tracebacks. The one-character fix at diff line 10 suppresses this chaining."
+      }
+    ]
   },
   {
     "id": "vercel-next.js-13509",
@@ -60,7 +166,28 @@
     "note": "Trusted Types policy against DOM XSS",
     "diff_file": "evals/prs/vercel-next.js-13509.diff",
     "diff_lines": 35,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "packages/next/client/page-loader.js",
+        "line_range": [29, 33],
+        "severity": "high",
+        "category": "security",
+        "issue": "script.src = url assigned a string directly to a DOM sink. In browsers with Trusted Types enforcement (CSP `require-trusted-types-for 'script'`), this throws a TypeError; without enforcement, an attacker who controls `url` can inject a cross-origin script URL for DOM XSS.",
+        "suggested_fix": "Create a Trusted Types policy with createScriptURL that validates the URL is well-formed and relative to document.baseURI, then use trustedTypesPolicy.createScriptURL(url) for the assignment when the policy is available.",
+        "confidence": 0.93,
+        "reasoning": "diff line 29: `script.src = url` is a direct string assignment to a TrustedScriptURL sink. The policy at diff lines 10-19 wraps the assignment so browsers enforcing Trusted Types don't block script loading, and provides a validated URL object for the src."
+      },
+      {
+        "file": "packages/next/client/page-loader.js",
+        "line_range": [12, 15],
+        "severity": "low",
+        "category": "security",
+        "issue": "The createHTML handler replaces `<` with `&lt;` but does not sanitize other HTML injection vectors (e.g., `>`, `\"`, `'`, or javascript: URIs). As-is the HTML policy is incomplete and should not be used for arbitrary user content.",
+        "suggested_fix": "Either implement a full HTML sanitizer in createHTML or use a library (DOMPurify). If createHTML is only used for known-safe static strings, document that invariant explicitly.",
+        "confidence": 0.7,
+        "reasoning": "createHTML at diff line 14 only escapes `<`. A string like `<img src=x onerror=alert(1)>` after this transform becomes `&lt;img src=x onerror=alert(1)>` which is still injectable as partial HTML in many contexts."
+      }
+    ]
   },
   {
     "id": "sympy-sympy-503",
@@ -69,7 +196,28 @@
     "note": "Numerical stability via relative error",
     "diff_file": "evals/prs/sympy-sympy-503.diff",
     "diff_lines": 157,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "sympy/utilities/randtest.py",
+        "line_range": [131, 148],
+        "severity": "high",
+        "category": "correctness",
+        "issue": "test_numerically used absolute error (`abs(f - g) <= tol`) to compare numerical results. For expressions that evaluate to large complex numbers, a tiny relative difference can easily exceed the absolute tolerance (1e-6), producing false test failures even when the functions are mathematically equivalent.",
+        "suggested_fix": "Switch to a relative error comparison when abs(z1) > 1: use diff/abs(z1) <= tol (relative) and diff <= tol (absolute) as the new comp() function implements.",
+        "confidence": 0.97,
+        "reasoning": "Original line 145: `return abs((f.subs(z, z0) - g.subs(z, z0)).n()) <= tol`. If f evaluates to 1e8, a 1e-6 relative error is 1e2, which far exceeds the 1e-6 absolute tol. The new comp() at diff lines 131-136 uses relative error for |z| > 1."
+      },
+      {
+        "file": "sympy/simplify/tests/test_hyperexpand.py",
+        "line_range": [8, 13],
+        "severity": "medium",
+        "category": "correctness",
+        "issue": "randcplx() generated test parameters without distinct offsets, so multiple calls could produce nearly identical complex numbers. When the same value is assigned to two different symbolic parameters (e.g., a1 ≈ a2), the hypergeometric function may degenerate or the numerical test may pass spuriously.",
+        "suggested_fix": "Pass an integer offset to randcplx(n) so successive parameters are separated by n*I, guaranteeing distinct values as implemented.",
+        "confidence": 0.88,
+        "reasoning": "The original randcplx() returned randrat() + I*randrat() — two draws from [10/50, 34/50] with no offset. Multiple calls in `map(lambda _: randcplx(), range(3))` at diff line 43 could coincidentally produce identical or near-identical values, making tests non-deterministically fragile."
+      }
+    ]
   },
   {
     "id": "elastic-elasticsearch-js-1594",
@@ -78,6 +226,17 @@
     "note": "Null reference fix in Transport.js",
     "diff_file": "evals/prs/elastic-elasticsearch-js-1594.diff",
     "diff_lines": 176,
-    "human_findings": []
+    "human_findings": [
+      {
+        "file": "lib/Transport.js",
+        "line_range": [8, 30],
+        "severity": "high",
+        "category": "correctness",
+        "issue": "The transportReturn thenable object called p.then(), p.catch(), and p.finally() unconditionally. When Transport.request() is invoked with a callback (non-promise mode), p is null or undefined, so any attempt to chain .then()/.catch()/.finally() on the returned transportReturn throws TypeError: Cannot read properties of null.",
+        "suggested_fix": "Guard each method with `if (p != null)` before delegating to p as implemented. In callback mode the caller doesn't use the promise methods, so silently returning undefined is correct.",
+        "confidence": 0.95,
+        "reasoning": "diff lines 9-12 and 14-18 and 25-29 add `if (p != null)` guards. Without them, calling `client.search({}).then(...)` after a custom Transport that returns null for the promise (or in callback mode) throws immediately."
+      }
+    ]
   }
 ]
