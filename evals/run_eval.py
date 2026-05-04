@@ -33,16 +33,28 @@ RESULTS_DIR = REPO_ROOT / "evals" / "results"
 console = Console()
 app = typer.Typer(add_completion=False)
 
-# Approximate cost per 1M tokens (claude-sonnet-4-6 pricing)
-_COST_PER_M = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}
+# Cost per 1M tokens by model family
+_PRICING: dict[str, dict[str, float]] = {
+    "claude-haiku":  {"input": 0.80, "output": 4.00,  "cache_read": 0.08, "cache_write": 1.00},
+    "claude-sonnet": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-opus":   {"input": 15.0, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
+}
 
 
-def _estimate_cost(usage: dict) -> float:
+def _pricing_for(model: str) -> dict[str, float]:
+    for family, rates in _PRICING.items():
+        if family in model:
+            return rates
+    return _PRICING["claude-sonnet"]  # safe fallback
+
+
+def _estimate_cost(usage: dict, model: str) -> float:
+    rates = _pricing_for(model)
     return (
-        usage.get("input_tokens", 0) * _COST_PER_M["input"] / 1_000_000
-        + usage.get("output_tokens", 0) * _COST_PER_M["output"] / 1_000_000
-        + usage.get("cache_read_input_tokens", 0) * _COST_PER_M["cache_read"] / 1_000_000
-        + usage.get("cache_creation_input_tokens", 0) * _COST_PER_M["cache_write"] / 1_000_000
+        usage.get("input_tokens", 0) * rates["input"] / 1_000_000
+        + usage.get("output_tokens", 0) * rates["output"] / 1_000_000
+        + usage.get("cache_read_input_tokens", 0) * rates["cache_read"] / 1_000_000
+        + usage.get("cache_creation_input_tokens", 0) * rates["cache_write"] / 1_000_000
     )
 
 
@@ -100,15 +112,15 @@ async def _run_one(label: dict, model: str, semaphore: asyncio.Semaphore) -> dic
             for k, v in call.items():
                 usage_totals[k] = usage_totals.get(k, 0) + v
 
-        cost = _estimate_cost(usage_totals) if usage_totals else None
+        cost = _estimate_cost(usage_totals, model) if usage_totals else None
 
         result = {
+            **output.model_dump(),
             "id": pr_id,
             "model": model,
             "elapsed_s": round(elapsed, 2),
             "cost_usd": round(cost, 6) if cost is not None else None,
             "usage": usage_totals,
-            **output.model_dump(),
         }
 
         n = len(output.findings)
