@@ -66,7 +66,7 @@ async def run_sub_reviewer(
 
     result = await instructor_client.chat.completions.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=1024,
         system=[
             {
                 "type": "text",
